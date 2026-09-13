@@ -10,18 +10,24 @@ from qdrant_client.models import (
     FilterSelector,
     MatchAny,
     MatchValue,
+    PayloadSchemaType,
     VectorParams,
 )
 
 from config import settings
 
 _embeddings: Optional[HuggingFaceEmbeddings] = None
+_client_cache: Optional[QdrantClient] = None
 
 
 def get_embeddings() -> HuggingFaceEmbeddings:
     global _embeddings
     if _embeddings is None:
-        _embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+        _embeddings = HuggingFaceEmbeddings(
+            model_name=settings.EMBEDDING_MODEL,
+            model_kwargs={"local_files_only": True},
+            encode_kwargs={"batch_size": 32},
+        )
     return _embeddings
 
 
@@ -30,10 +36,26 @@ def collection_name(user_id: str) -> str:
 
 
 def _client() -> QdrantClient:
-    kwargs: dict = {"url": settings.QDRANT_URL}
-    if settings.QDRANT_API_KEY:
-        kwargs["api_key"] = settings.QDRANT_API_KEY
-    return QdrantClient(**kwargs)
+    global _client_cache
+    if _client_cache is None:
+        kwargs: dict = {"url": settings.QDRANT_URL}
+        if settings.QDRANT_API_KEY:
+            kwargs["api_key"] = settings.QDRANT_API_KEY
+        _client_cache = QdrantClient(**kwargs)
+    return _client_cache
+
+
+def _ensure_payload_indexes(client: QdrantClient, name: str) -> None:
+    # Required so delete_documents()/search() can filter on metadata.doc_id.
+    for field in ("metadata.doc_id", "metadata.user_id"):
+        try:
+            client.create_payload_index(
+                collection_name=name,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
 
 
 def ensure_collection(user_id: str) -> str:
@@ -47,6 +69,7 @@ def ensure_collection(user_id: str) -> str:
                 distance=Distance.COSINE,
             ),
         )
+    _ensure_payload_indexes(client, name)
     return name
 
 
@@ -71,6 +94,10 @@ def delete_documents(user_id: str, document_id: str = None) -> None:
     if document_id is None:
         client.drop_collection(collection_name=name)
         return
+
+    # delete_documents() may run before add_documents()/ensure_collection(),
+    # so make sure the payload index exists for the filter below.
+    _ensure_payload_indexes(client, name)
 
     filter_ = Filter(
         must=[FieldCondition(key="metadata.doc_id", match=MatchValue(value=document_id))]

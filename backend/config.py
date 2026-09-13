@@ -11,6 +11,10 @@ class Settings:
     BASE_URL: str = os.getenv("BASE_URL", "")
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gemini-3.6-flash")
 
+    GROQ_API_KEY : str = os.getenv('GROQ_API_KEY', '')
+    BASE_URL_GROQ : str = os.getenv('BASE_URL_GROQ', '')
+    MODEL_NAME_GROQ : str = os.getenv('MODEL_NAME_GROQ', '')
+
     JWT_SECRET: str = os.getenv("JWT_SECRET", "change-me")
     ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))

@@ -17,10 +17,14 @@ _llm: Optional[OpenAI] = None
 def _get_llm() -> OpenAI:
     global _llm
     if _llm is None:
+        # _llm = OpenAI(
+        #     api_key=settings.GEMINI_API_KEY,
+        #     base_url=settings.BASE_URL,
+        # ) for gemini
         _llm = OpenAI(
-            api_key=settings.GEMINI_API_KEY,
-            base_url=settings.BASE_URL,
-        )
+            api_key=settings.GROQ_API_KEY,
+            base_url=settings.BASE_URL_GROQ
+)
     return _llm
 
 
@@ -41,7 +45,7 @@ def _retrieve_context(query: str, user_id: str, document_ids: Optional[list[str]
 
 def _complete(system_prompt: str, user_message: str, json_mode: bool = False) -> str:
     kwargs: dict = {
-        "model": settings.MODEL_NAME,
+        "model": settings.MODEL_NAME_GROQ,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},

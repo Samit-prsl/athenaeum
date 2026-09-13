@@ -9,7 +9,8 @@ if settings.DATABASE_URL.startswith("sqlite"):
 
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args=connect_args,
+    #connect_args=connect_args,
+    #enable only locally when using sqlite
 )
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)

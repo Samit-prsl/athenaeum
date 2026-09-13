@@ -52,7 +52,7 @@ the user boundary.
          │  server.py → queues/rag_jobs.py    │   │   documents)        │
          └───────────────────────┬────────────┘   └─────────────────────┘
                                  │
-                         SpawnWorker (re-exec per job)
+                         SimpleWorker (in-process, model preloaded)
                      ┌───────────▼──────────────────────────────────────┐
                      │ worker.py → queues/rag_jobs.py                  │
                      │                                                │
@@ -74,7 +74,7 @@ config.py                     env-driven settings singleton
 models.py                     SQLAlchemy User, Document
 schemas.py                    Pydantic request/response contracts
 system_prompt.py              ANSWER / QUIZ / SUMMARY prompt builders
-worker.py                     RQ SpawnWorker entrypoint
+worker.py                     RQ worker entrypoint (simple / spawn / fork)
 client/rq_client.py           enqueue_job(), fetch_job()
 queues/rag_jobs.py            ingest_document, answer_question, generate_quiz, generate_summary
 services/db.py                SQLAlchemy engine, session, init_db
@@ -206,7 +206,7 @@ stateless and simple.
 ### 4.2 PDF upload → ingestion pipeline
 
 ```
-Client                          FastAPI                    Redis/RQ        SpawnWorker        Qdrant
+Client                          FastAPI                    Redis/RQ        Worker           Qdrant
   │                               │                         │               │                  │
   │  POST /documents              │                         │               │                  │
   │  files[]                      │                         │               │                  │
@@ -226,7 +226,7 @@ Client                          FastAPI                    Redis/RQ        Spawn
   │                               │────────────────────────→│               │                  │
   │  202 {uploads: [{job_id}]}    │                         │               │                  │
   │←──────────────────────────────│                         │               │                  │
-  │                               │                         │  fork (exec)  │                  │
+  │                               │                         │  (in-process) │                  │
   │                               │                         │──────────────→│                  │
   │                               │                         │               │ load_pdf_pages() │
   │                               │                         │               │ pypdf: per-page  │
@@ -253,7 +253,7 @@ Client                          FastAPI                    Redis/RQ        Spawn
 ```
 
 **Why async?** A 6-page PDF takes ~3s for text extraction and
-embedding, plus model load in SpawnWorker (~2s first call). A 50-page
+embedding, plus model load at worker startup (~3s). A 50-page
 PDF with heavy embedding could take 15-30s. Returning synchronously
 would block the client. The 202 + `job_id` pattern lets the frontend
 poll `GET /jobs/{job_id}` at its own pace.
@@ -275,7 +275,7 @@ means re-uploading the same PDF simply replaces the old index.
 ### 4.3 Chat / quiz / summary flow
 
 ```
-Client                          FastAPI                    Redis/RQ        SpawnWorker
+Client                          FastAPI                    Redis/RQ        Worker
   │                               │                         │               │
   │  POST /chat                   │                         │               │
   │  {question, document_ids?:[]} │                         │               │
@@ -288,7 +288,7 @@ Client                          FastAPI                    Redis/RQ        Spawn
   │                               │────────────────────────→│               │
   │  202 {job_id}                 │                         │               │
   │←──────────────────────────────│                         │               │
-  │                               │                         │  fork (exec)  │
+  │                               │                         │  (in-process) │
   │                               │                         │──────────────→│
   │                               │                         │               │
   │                               │                         │  _retrieve_context():
@@ -416,6 +416,12 @@ time, the child crashes with `SIGABRT`.
 occurs, so the ObjC state is never copied. The tradeoff is that the
 embedding model reloads per job (~2s first call, <1s cached).
 
+> **Superseded by §6.6:** revisited later because re-exec per job meant
+> re-loading the embedding model every time (~10s/job with the HF Hub
+> network check). The current worker mode is `simple`
+> (`rq.SimpleWorker`): jobs run in-process on a preloaded model — safe
+> on macOS (no fork) and avoids per-job model load.
+
 ### 6.3 langchain-qdrant 1.1.0 constructor change
 
 **Symptom:** `QdrantVectorStore.__init__() got an unexpected keyword argument 'url'`
@@ -440,6 +446,16 @@ directly.
 **Fix:** `services/vectorstore.py:105-111` uses `query_filter=` (no
 `with_vector`). Tests updated to use `scroll_filter=`.
 
+> **Note (6.4 follow-up):** qdrant-client ≥1.19 also requires explicit
+> **payload indexes** for field filters. `delete()` by `metadata.doc_id`
+> without an index raises
+> `QdrantException: Index required but not found for metadata.doc_id`.
+> `services/vectorstore.py` now creates keyword payload indexes on
+> `metadata.doc_id` and `metadata.user_id` via `_ensure_payload_indexes()`
+> (called from `ensure_collection()` and `delete_documents()`). Without
+> this, the *second* upload of a document (which deletes old points first)
+> fails while the first succeeds — see §6.6.
+
 ### 6.5 Nested payload filter trap
 
 **Symptom:** `DELETE /documents/{id}` returned 204 but points remained
@@ -457,6 +473,83 @@ correctly.
 **Lesson:** In RQ + FastAPI setups, restarting only the worker does NOT
 refresh imported code in the API process. Both must be restarted when
 shared modules change.
+
+### 6.6 Slow document vector embedding (the "it's still slow" saga)
+
+**Symptom:** every PDF ingestion took ~10s+ even for a small 6-page PDF,
+dominated by embedding warm-up, not by the actual encoding.
+Uploads appeared "stuck" well after the model had already been
+used before.
+
+**What we measured (cold path breakdown):**
+| Stage | Cost |
+|-------|------|
+| HF Hub unauthenticated network check (`whoami` / token probe) | ~7s |
+| `import torch` + `transformers` + `sentence-transformers` | ~3s |
+| Actual `encode()` of a few pages | ~0.1s |
+
+So ~99% of the per-job time was model re-loading; the encode itself was
+negligible. Three compounding root causes:
+
+1. **`RQ_WORKER_MODE=spawn`**: `config.py` defaulted to `"spawn"`, so the
+   worker re-exec'd a fresh process *per job* — model import, HF cache
+   load, and the unauthenticated HF Hub network check ran on **every
+   job**, not just the first.
+2. **HF Hub offline probe**: even after fixing the worker, the
+   unauthenticated HF Hub check fires on import unless explicitly
+   disabled.
+3. **mismatched infrastructure**: the restarted API was enqueuing to
+   cloud Upstash Redis while the long-running worker still listened on
+   local Docker Redis (`localhost:6379`) — jobs were "stuck" with zero
+   workers actually watching the right queue.
+
+**Fixes applied:**
+
+* `RQ_WORKER_MODE = simple` in `.env`, and `worker.py` now uses
+  `rq.SimpleWorker` (in-process, no re-exec) **and pre-loads**
+  `get_embeddings()` before `worker.work()`:
+  ```python
+  if settings.RQ_WORKER_MODE == "simple":
+      _preload_embeddings()
+      SimpleWorker(queues, connection=rq_conn).work()
+  ```
+  Result: `Loading weights` appears exactly **once** in the worker log,
+  and subsequent jobs reuse the warm model (~0.1s instead of ~10s).
+* `HF_HUB_OFFLINE = 1` in `.env` → kills the ~7s network check on import.
+* `SSL_CERT_FILE` set to the venv `certifi` CA bundle —
+  cloud Upstash Redis (rediss/TLS) requires a real CA chain, otherwise
+  the worker can't connect at all.
+* Restart **both** API and worker so shared modules pick up the new code.
+
+**Why `SimpleWorker` and not fork?** We tried the obvious fast path
+first: keep the default fork-based `Worker` (which shares the preloaded
+model via copy-on-write) and preload. On macOS with PyTorch this
+**segfaults** (torch + ObjC forking safety — see §6.2, exit status 11),
+because torch's threading primitives are not fork-safe. Fork +
+preloaded model was fast but crashed; `SpawnWorker` was safe but
+re-loaded per job. `SimpleWorker` avoids the fork entirely (jobs run
+in-process) and lets a single model instance serve every job.
+
+**Second-order bug it exposed:** re-uploading a PDF (which deletes old
+points by `metadata.doc_id` first) hit
+`Index required but not found for metadata.doc_id` in `add_documents()`.
+Qdrant needs an explicit payload index to filter on a nested field
+(§6.4 follow-up); fixed with `_ensure_payload_indexes()` creating
+keyword indexes on `metadata.doc_id` / `metadata.user_id` at collection
+creation **and** before every delete.
+
+**Result after the fixes:** cold worker start still pays the ~3s
+import, but every subsequent ingestion job runs embedding at ~0.1s.
+End-to-end smoke test (upload → poll → searchable): first upload
+~4.5s, second upload ~6s incl. queue/poll overhead, jobs finish in
+~3s. Verification: `pgrep` the worker PID, grep the worker log for a
+single `Loading weights`, and query Qdrant for both docs by new+old
+`doc_id`.
+
+**Lesson:** profile the cold path once (per-job model load vs encode
+time), then verify the running processes match the config you think is
+deployed — a stale worker on the wrong Redis is the classic "fix didn't
+work" report.
 
 ---
 
@@ -504,7 +597,7 @@ responsive.
 
 **Implementation:** RQ (Redis Queue) handles job dispatch.
 `client/rq_client.py:11-18` enqueues functions with args serialized to
-Redis. `worker.py` runs a `SpawnWorker` that dequeues jobs and executes
+Redis. `worker.py` runs a `SimpleWorker` that dequeues jobs and executes
 them in fresh processes. Results are stored in Redis with configurable
 TTL (`JOB_RESULT_TTL = 86400` = 1 day). Clients poll via
 `GET /jobs/{job_id}` (`server.py:313-324`).
@@ -622,20 +715,20 @@ sentences, optimized for semantic similarity.
 - Good balance of quality/speed for student content
 - 384 dimensions keeps storage and search efficient
 
-**Model load lifecycle under SpawnWorker:**
-Each job spawns a fresh Python process, which imports
-`HuggingFaceEmbeddings` → downloads/loads model from
-`~/.cache/huggingface/`. First call: ~2s (model from disk cache into
-memory). Subsequent calls in the same process: <100ms. Since
-SpawnWorker creates a new process per job, the model loads from cache
-each time — an accepted tradeoff for avoiding the macOS fork crash.
+**Model load lifecycle under SimpleWorker:**
+The worker loads the embedding model **once** at startup
+(`_preload_embeddings()` in `worker.py`) and serves every job
+in-process via `rq.SimpleWorker`. First call pays the model import +
+cache load (~3s with `HF_HUB_OFFLINE=1`); every subsequent embedding is
+<100ms. See §6.6 for why fork (fast, but segfaults with PyTorch on
+macOS) and SpawnWorker (safe, but reloads per job) were rejected.
 
 **Improvement ideas:**
 - Switch to `Worker` (fork) on Linux with `OBJC_DISABLE_INITIALIZE_FORK_SAFETY`-style
-  workarounds to avoid per-job model loads
+  workarounds to avoid the in-process model (SimpleWorker serializes
+  jobs; concurrent processing needs multiple worker processes)
 - Use ONNX-optimized embeddings for faster CPU inference
-- Cache the embedding model in Redis shared memory for multi-worker
-  setups
+- Cache the embedding model in shared memory for multi-worker setups
 - Use Qdrant's built-in payload indexes on `metadata.doc_id` for
   faster filtered search
 
@@ -724,7 +817,7 @@ users uploading simultaneously.
 |-----------|---------|---------------|
 | SQLite writes | Single-file, ~30s timeout | Postgres/MySQL + connection pooling |
 | Qdrant collections | 1 per user (lightweight) | Shard across nodes when >50K collections |
-| Model load per job | SpawnWorker re-loads per job | Fork on Linux, or use ONNX runtime |
+| Model load per job | SimpleWorker preloads once, jobs serialized in-process | Multiple SimpleWorker processes, or fork on Linux (segfaults on macOS with torch) |
 | LLM latency | Synchronous call blocks worker | Multiple workers, streaming responses |
 | No job retry | Failed jobs stay failed | RQ `Retry(max=3, interval=[10, 30, 60])` |
 | Polling overhead | Client polls every 3s | SSE/WebSocket push on job completion |
@@ -753,7 +846,7 @@ users uploading simultaneously.
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `GET /jobs/{id}` returns `status: failed`, `error: TypeError: ... unexpected keyword argument 'timeout'` | Old rq_client code running | Restart API process |
-| `GET /jobs/{id}` returns `status: failed`, `error: SIGABRT / objc ... fork` | macOS fork crash with default Worker | Ensure `worker.py` uses `SpawnWorker` |
+| `GET /jobs/{id}` returns `status: failed`, `error: SIGABRT / objc ... fork` | macOS fork crash in fork mode | Set `RQ_WORKER_MODE=simple` (or `spawn`) in `.env` |
 | `GET /jobs/{id}` returns `status: finished`, `result: "No documents have been indexed yet"` | Qdrant filter returned 0 points — wrong field path in filter | Check `metadata.doc_id` not `doc_id` |
 | Ingest succeeds but `GET /documents` still shows `processing` | Worker crashed before the DB update, or old API code | Check worker log; restart API + worker |
 | `DELETE /documents/{id}` returns 204 but points remain | API running old code with wrong filter path | Restart API |
@@ -761,4 +854,7 @@ users uploading simultaneously.
 | `401 Unauthorized` on all protected endpoints | JWT expired or wrong token | Re-login, send fresh access token |
 | `database is locked` error | SQLite contention from concurrent writes | Already mitigated with `timeout=30`; for persistent issues, migrate to Postgres |
 | Worker log shows `HuggingFaceEmbeddings` download progress | First run, model downloading | Wait for completion (~80MB); subsequent runs use cache |
+| Ingestion takes ~10s+ every job (heavy even for small PDFs) | `RQ_WORKER_MODE=spawn` re-execs per job → model + HF Hub check reloaded each time | Set `RQ_WORKER_MODE=simple` + `HF_HUB_OFFLINE=1`; restart worker; verify single `Loading weights` in log (§6.6) |
+| Jobs "stuck" QUEUED though worker is running | Worker listening on a different Redis (e.g. Docker `localhost:6379`) than the API enqueues to (cloud Upstash) | Confirm `REDIS_URL` matches; restart API **and** worker; check `rq:queue:default` length |
+| Second upload of the same PDF fails with `Index required but not found for metadata.doc_id` | Qdrant payload index missing for nested filter field | `_ensure_payload_indexes()` creates keyword indexes on `metadata.doc_id`/`metadata.user_id` at collection creation + before delete (§6.6) |
 | Quiz returns raw text instead of JSON | LLM ignored `response_format: json_object` | Regex fallback extracts JSON; retry may work |
