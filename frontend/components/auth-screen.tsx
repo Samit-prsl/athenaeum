@@ -62,7 +62,7 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#f7f8fb] px-5 py-10 text-[#171822] dark:bg-[#12131a] dark:text-[#e8e8ee]">
-      <div className="w-full">
+      <div className="sm:w-full lg:w-1/2 ">
         <div className="mb-6 flex justify-center">
           <div className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-[12px] bg-[#5b52eb] text-white shadow-[0_8px_20px_rgba(91,82,235,.3)]">
