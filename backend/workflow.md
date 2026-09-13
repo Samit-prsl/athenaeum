@@ -551,6 +551,79 @@ time), then verify the running processes match the config you think is
 deployed — a stale worker on the wrong Redis is the classic "fix didn't
 work" report.
 
+### 6.7 Postgres (Neon) drops the pooled connection — "processing is slow again"
+
+**Symptom:** after switching `DATABASE_URL` from local SQLite to a cloud
+Neon Postgres instance, an ingestion job failed immediately at the
+document lookup and every re-upload looked "slow again":
+
+```
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError)
+SSL connection has been closed unexpectedly
+[SQL: SELECT documents.id, ... FROM documents WHERE documents.id = %(pk_1)s]
+```
+
+**Root cause:** the worker runs long-lived in-process
+(`RQ_WORKER_MODE=simple`, §6.6), so the SQLAlchemy engine pool holds
+connections open for hours. Neon terminates idle SSL connections, and
+the pool hands out the now-dead connection on the next job because no
+liveness check was enabled (`pool_pre_ping` defaults to `False`).
+SQLite never exposed this (local file, no server-side idle kill — but
+it *did* hit its own `database is locked` variant, §6 / troubleshooting).
+
+Two compounding bugs made the impact worse:
+
+1. **`db.get()` ran outside the `try/finally`** in `ingest_document`
+   (`queues/rag_jobs.py`). When the dead connection raised, the
+   exception propagated uncaught: the `Session` leaked, the document
+   was never marked `failed`, and it stayed stuck at `processing`
+   forever.
+2. **No retry.** The only remedy was re-uploading the same PDF, which
+   re-ran the full parse → embed → Qdrant pipeline — i.e. "document
+   processing is taking time again".
+
+**Fixes applied:**
+
+* `services/db.py` now enables `pool_pre_ping=True` on the engine, so
+  every pooled connection gets a cheap `SELECT 1` health check before
+  use; stale connections are discarded and transparently replaced. For
+  Postgres URLs it also sets `pool_recycle=300` (proactively drop
+  connections older than Neon's idle cutoff) and
+  `connect_args={"connect_timeout": 15}` so a hung socket fails fast
+  instead of blocking a job for up to `JOB_TIMEOUT` (900s). SQLite keeps
+  its `timeout=30` / `check_same_thread` connect args.
+* New util `services/retry.py`: `retry_on_errors()` decorator (defaults:
+  3 attempts, 1s initial delay, ×2 backoff) that catches
+  `sqlalchemy.exc.DBAPIError` (wraps driver failures like the psycopg2
+  `OperationalError`) and retries with a logged warning. Applied via
+  `@retry_on_errors()` to `ingest_document`; since each attempt creates a
+  fresh `Session`, a transient DB drop self-heals.
+* `ingest_document` (`queues/rag_jobs.py`) moved `SessionLocal()` /
+  `db.get()` **inside** `try/finally` so the session is always closed;
+  `row` is initialised to `None` before the block and the failure branch
+  only marks the document `failed` when a row was actually fetched. The
+  "mark failed" commit is guarded in its own `try/except` so a fully
+  down DB logs the warning instead of masking the original exception
+  (and the original error is still re-raised for RQ).
+
+**Result:** a job that hits a dropped connection now reconnects
+transparently (pre-ping) and, if it still trips, retries from a fresh
+session up to 3 times instead of failing. Documents no longer get stuck
+at `processing`, so re-uploading a PDF to "fix" it is no longer
+necessary — the underlying slowness that re-upload exposed is gone.
+
+**Remaining alternatives:** for a fully stateless/dep-free path you could
+also dedupe uploads by content hash (skip parse + embed when an identical
+file is already indexed) — intentionally not implemented here, this fix is
+scoped to DB resilience only.
+
+**Verify:** restart **both** API and worker (shared module changes);
+upload a PDF and poll `GET /documents` — expect `ready` on the first
+pass. To reproduce the failure mode, let the worker idle past Neon's
+idle-connection cutoff, then enqueue a job; the worker log should show
+the pre-ping reconnect (no `SSL connection has been closed` error in the
+failure path).
+
 ---
 
 ## 7. hot points

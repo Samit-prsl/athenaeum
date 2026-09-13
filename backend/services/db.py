@@ -3,15 +3,20 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from config import settings
 
-connect_args = {"check_same_thread": False}
-if settings.DATABASE_URL.startswith("sqlite"):
-    connect_args["timeout"] = 30
-
-engine = create_engine(
-    settings.DATABASE_URL,
-    #connect_args=connect_args,
-    #enable only locally when using sqlite
-)
+if settings.DATABASE_URL.startswith("postgres"):
+    engine = create_engine(
+        settings.DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={"connect_timeout": 15},
+    )
+else:
+    # sqlite local dev
+    engine = create_engine(
+        settings.DATABASE_URL,
+        pool_pre_ping=True,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 

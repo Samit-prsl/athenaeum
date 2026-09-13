@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Optional
 
@@ -6,10 +7,13 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from config import settings
+from services.retry import retry_on_errors
 from services.vectorstore import search
 from system_prompt import QUIZ_SYSTEM_PROMPT, RAG_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
 
 load_dotenv()
+
+log = logging.getLogger("athenaeum.rag_jobs")
 
 _llm: Optional[OpenAI] = None
 
@@ -58,6 +62,7 @@ def _complete(system_prompt: str, user_message: str, json_mode: bool = False) ->
     return response.choices[0].message.content
 
 
+@retry_on_errors()
 def ingest_document(user_id: str, document_id: str) -> dict:
     import io
 
@@ -67,12 +72,12 @@ def ingest_document(user_id: str, document_id: str) -> dict:
     from services.vectorstore import add_documents, delete_documents
 
     db = SessionLocal()
-    row = db.get(DocumentRow, document_id)
-    if row is None:
-        db.close()
-        raise ValueError(f"Document {document_id} does not exist")
-
+    row = None
     try:
+        row = db.get(DocumentRow, document_id)
+        if row is None:
+            raise ValueError(f"Document {document_id} does not exist")
+
         if not row.content:
             raise ValueError(f"Document {document_id} has no stored content")
 
@@ -97,9 +102,13 @@ def ingest_document(user_id: str, document_id: str) -> dict:
             "chunks_indexed": len(pages),
         }
     except Exception as exc:
-        row.status = "failed"
-        row.error = str(exc)
-        db.commit()
+        if row is not None:
+            try:
+                row.status = "failed"
+                row.error = str(exc)
+                db.commit()
+            except Exception:
+                log.exception("Failed to persist 'failed' status for document %s", document_id)
         raise
     finally:
         db.close()
