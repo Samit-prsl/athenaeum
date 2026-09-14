@@ -1,8 +1,9 @@
 import type {
   ApiError,
+  ChatResult,
   Document,
-  JobResult,
   Quiz,
+  SummaryResult,
   TokenPair,
   UploadItem,
   User,
@@ -155,62 +156,38 @@ export async function deleteDocument(documentId: string): Promise<void> {
   return request<void>(`/documents/${documentId}`, { method: 'DELETE' })
 }
 
-export async function startChat(
+export async function chat(
   question: string,
   document_ids: string[] | null,
-): Promise<{ job_id: string }> {
-  return request<{ job_id: string }>('/chat', {
+): Promise<ChatResult> {
+  return request<ChatResult>('/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, document_ids }),
   })
 }
 
-export async function startQuiz(
+export async function quiz(
   topic: string,
   num_questions: number,
   document_ids: string[] | null,
-): Promise<{ job_id: string }> {
-  return request<{ job_id: string }>('/quiz', {
+): Promise<Quiz> {
+  return request<Quiz>('/quiz', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, num_questions, document_ids }),
   })
 }
 
-export async function startSummary(
+export async function summary(
   topic: string,
   document_ids: string[] | null,
-): Promise<{ job_id: string }> {
-  return request<{ job_id: string }>('/summary', {
+): Promise<SummaryResult> {
+  return request<SummaryResult>('/summary', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, document_ids }),
   })
-}
-
-export async function getJob(jobId: string): Promise<JobResult> {
-  return request<JobResult>(`/jobs/${jobId}`)
-}
-
-export const jobIsDone = (status: JobResult['status']) =>
-  status === 'finished' || status === 'failed' || status === 'stopped' || status === 'canceled'
-
-export function jobError(job: JobResult): string | null {
-  if (job.status === 'failed') {
-    const detail = job.error
-    if (typeof detail === 'string' && detail.trim()) return detail.trim()
-    return 'The job failed. Please try again.'
-  }
-  return null
-}
-
-export async function waitForJob(jobId: string, intervalMs = 1500): Promise<JobResult> {
-  for (;;) {
-    const job = await getJob(jobId)
-    if (jobIsDone(job.status)) return job
-    await new Promise((resolve) => setTimeout(resolve, intervalMs))
-  }
 }
 
 export type { Quiz }

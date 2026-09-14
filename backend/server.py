@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -14,18 +15,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from client.rq_client import enqueue_job, fetch_job
 from config import settings
 from models import User
-from queues.rag_jobs import answer_question, generate_quiz, generate_summary, ingest_document
 from schemas import (
     AccessToken,
+    ChatOut,
     ChatRequest,
     DocumentOut,
-    JobOut,
-    JobResultOut,
     QuizRequest,
     RefreshRequest,
+    SummaryOut,
     SummaryRequest,
     TokenPair,
     UploadItemOut,
@@ -34,6 +33,7 @@ from schemas import (
     RegisterRequest,
 )
 from services.db import get_db, init_db
+from services.rag import answer_question, generate_quiz, generate_summary, ingest_document
 from services.security import (
     create_access_token,
     create_refresh_token,
@@ -161,6 +161,7 @@ def me(current_user: User = Depends(get_current_user)):
 # --------------------------------------------------------------------------- #
 @app.post("/documents", status_code=status.HTTP_202_ACCEPTED, response_model=UploadsOut)
 def upload_documents(
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(..., description="One or more PDF files"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -198,18 +199,9 @@ def upload_documents(
         db.add(row)
         db.commit()
         db.refresh(row)
-        try:
-            job = enqueue_job(ingest_document, current_user.id, row.id)
-        except Exception as exc:
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to enqueue ingestion for '{original}': {exc}",
-            ) from exc
+        background_tasks.add_task(ingest_document, current_user.id, row.id)
 
-        items.append(
-            UploadItemOut(filename=original, document_id=row.id, job_id=job.id)
-        )
+        items.append(UploadItemOut(filename=original, document_id=row.id))
 
     return UploadsOut(uploads=items)
 
@@ -252,60 +244,42 @@ def remove_document(
 
 
 # --------------------------------------------------------------------------- #
-# Query / jobs
+# Query
 # --------------------------------------------------------------------------- #
-@app.post("/chat", status_code=status.HTTP_202_ACCEPTED, response_model=JobOut)
+@app.post("/chat", response_model=ChatOut)
 def chat(
     payload: ChatRequest,
     current_user: User = Depends(get_current_user),
-):
-    job = enqueue_job(
-        answer_question,
+) -> ChatOut:
+    answer = answer_question(
         current_user.id,
         payload.question,
         payload.document_ids,
     )
-    return JobOut(job_id=job.id)
+    return ChatOut(answer=answer)
 
 
-@app.post("/quiz", status_code=status.HTTP_202_ACCEPTED, response_model=JobOut)
+@app.post("/quiz")
 def quiz(
     payload: QuizRequest,
     current_user: User = Depends(get_current_user),
-):
-    job = enqueue_job(
-        generate_quiz,
+) -> dict:
+    return generate_quiz(
         current_user.id,
         payload.topic,
         payload.num_questions,
         payload.document_ids,
     )
-    return JobOut(job_id=job.id)
 
 
-@app.post("/summary", status_code=status.HTTP_202_ACCEPTED, response_model=JobOut)
+@app.post("/summary", response_model=SummaryOut)
 def summary(
     payload: SummaryRequest,
     current_user: User = Depends(get_current_user),
-):
-    job = enqueue_job(
-        generate_summary,
+) -> SummaryOut:
+    result = generate_summary(
         current_user.id,
         payload.topic,
         payload.document_ids,
     )
-    return JobOut(job_id=job.id)
-
-
-@app.get("/jobs/{job_id}", response_model=JobResultOut)
-def get_job(job_id: str):
-    job = fetch_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-    return JobResultOut(
-        job_id=job_id,
-        status=job.get_status(),
-        result=job.result,
-        error=job.exc_info if job.is_failed else None,
-    )
+    return SummaryOut(summary=result)

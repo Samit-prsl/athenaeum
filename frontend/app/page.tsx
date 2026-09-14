@@ -704,10 +704,7 @@ function ChatView({
     setError(null)
     setPending(text)
     try {
-      const { job_id } = await api.startChat(text, selectedIds.length ? selectedIds : null)
-      const job = await api.waitForJob(job_id)
-      const jobFailed = api.jobError(job)
-      const answer = jobFailed ?? String(job.result ?? '')
+      const { answer } = await api.chat(text, selectedIds.length ? selectedIds : null)
       setTranscript((current) => [...current, { question: text, answer }])
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to reach Athena.'
@@ -870,13 +867,11 @@ function QuizView({
     setError(null)
     setQuiz(null)
     try {
-      const { job_id } = await api.startQuiz(subject, numQuestions, selectedIds.length ? selectedIds : null)
-      const job = await api.waitForJob(job_id)
-      const jobErrorMessage = api.jobError(job)
-      if (jobErrorMessage) {
-        setError(jobErrorMessage)
-      } else if (job.result && typeof job.result === 'object') {
-        setQuiz(job.result as Quiz)
+      const result = await api.quiz(subject, numQuestions, selectedIds.length ? selectedIds : null)
+      if (result.message) {
+        setError(result.message)
+      } else if (result.questions?.length) {
+        setQuiz(result)
       } else {
         setError('Athena returned an unexpected quiz format.')
       }
@@ -1033,14 +1028,8 @@ function SummaryView({
     setError(null)
     setResult(null)
     try {
-      const { job_id } = await api.startSummary(subject, selectedIds.length ? selectedIds : null)
-      const job = await api.waitForJob(job_id)
-      const jobErrorMessage = api.jobError(job)
-      if (jobErrorMessage) {
-        setError(jobErrorMessage)
-      } else {
-        setResult(typeof job.result === 'string' ? job.result : String(job.result ?? ''))
-      }
+      const { summary: text } = await api.summary(subject, selectedIds.length ? selectedIds : null)
+      setResult(text)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate the summary.')
     } finally {

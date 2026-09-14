@@ -48,7 +48,6 @@ class DocumentOut(BaseModel):
 class UploadItemOut(BaseModel):
     filename: str
     document_id: str
-    job_id: str
 
 
 class UploadsOut(BaseModel):
@@ -58,6 +57,10 @@ class UploadsOut(BaseModel):
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1)
     document_ids: Optional[list[str]] = None
+
+
+class ChatOut(BaseModel):
+    answer: str
 
 
 class QuizRequest(BaseModel):
@@ -71,12 +74,5 @@ class SummaryRequest(BaseModel):
     document_ids: Optional[list[str]] = None
 
 
-class JobOut(BaseModel):
-    job_id: str
-
-
-class JobResultOut(BaseModel):
-    job_id: str
-    status: str
-    result: Optional[object] = None
-    error: Optional[str] = None
+class SummaryOut(BaseModel):
+    summary: str

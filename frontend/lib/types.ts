@@ -25,24 +25,14 @@ export type Document = {
 export type UploadItem = {
   filename: string
   document_id: string
-  job_id: string
 }
 
-export type JobStatus =
-  | 'queued'
-  | 'started'
-  | 'finished'
-  | 'failed'
-  | 'deferred'
-  | 'scheduled'
-  | 'canceled'
-  | 'stopped'
+export type ChatResult = {
+  answer: string
+}
 
-export type JobResult = {
-  job_id: string
-  status: JobStatus
-  result: unknown
-  error: string | null
+export type SummaryResult = {
+  summary: string
 }
 
 export type QuizQuestion = {

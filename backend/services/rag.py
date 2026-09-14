@@ -13,7 +13,7 @@ from system_prompt import QUIZ_SYSTEM_PROMPT, RAG_SYSTEM_PROMPT, SUMMARY_SYSTEM_
 
 load_dotenv()
 
-log = logging.getLogger("athenaeum.rag_jobs")
+log = logging.getLogger("athenaeum.rag")
 
 _llm: Optional[OpenAI] = None
 
@@ -21,14 +21,10 @@ _llm: Optional[OpenAI] = None
 def _get_llm() -> OpenAI:
     global _llm
     if _llm is None:
-        # _llm = OpenAI(
-        #     api_key=settings.GEMINI_API_KEY,
-        #     base_url=settings.BASE_URL,
-        # ) for gemini
         _llm = OpenAI(
             api_key=settings.GROQ_API_KEY,
             base_url=settings.BASE_URL_GROQ
-)
+        )
     return _llm
 
 
