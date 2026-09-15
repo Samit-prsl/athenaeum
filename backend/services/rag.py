@@ -65,6 +65,7 @@ def ingest_document(user_id: str, document_id: str) -> dict:
     from models import Document as DocumentRow
     from services.db import SessionLocal
     from services.pdf import load_pdf_pages
+    from services.storage import download_object
     from services.vectorstore import add_documents, delete_documents
 
     db = SessionLocal()
@@ -75,9 +76,9 @@ def ingest_document(user_id: str, document_id: str) -> dict:
             raise ValueError(f"Document {document_id} does not exist")
 
         if not row.content:
-            raise ValueError(f"Document {document_id} has no stored content")
+            raise ValueError(f"Document {document_id} has no stored object key")
 
-        stream = io.BytesIO(row.content)
+        stream = io.BytesIO(download_object(row.content.decode()))
         pages, total_pages = load_pdf_pages(stream, name=row.filename)
         for page_doc in pages:
             page_doc.metadata["user_id"] = user_id

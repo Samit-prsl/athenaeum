@@ -41,6 +41,7 @@ from services.security import (
     hash_password,
     verify_password,
 )
+from services.storage import build_key, delete_object, upload_object
 from services.vectorstore import delete_documents
 
 
@@ -190,13 +191,26 @@ def upload_documents(
 
         from models import Document as DocumentRow
 
+        data = b"".join(chunks)
         row = DocumentRow(
             user_id=current_user.id,
             filename=original,
-            content=b"".join(chunks),
             status="processing",
         )
         db.add(row)
+        db.flush()
+
+        key = build_key(current_user.id, row.id)
+        try:
+            upload_object(key, data)
+        except Exception:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to store file '{original}' in object storage",
+            )
+        row.content = key.encode()
+
         db.commit()
         db.refresh(row)
         background_tasks.add_task(ingest_document, current_user.id, row.id)
@@ -236,6 +250,12 @@ def remove_document(
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if row.content:
+        try:
+            delete_object(row.content.decode())
+        except UnicodeDecodeError:
+            pass
 
     delete_documents(current_user.id, document_id)
 

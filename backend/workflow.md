@@ -28,6 +28,7 @@ uploaded content with page-level citations.
 | Task queue | RQ + Redis | Async job processing (ingestion + LLM calls) |
 | Vector store | Qdrant | Per-user collections, similarity search |
 | Relational DB | SQLite + SQLAlchemy | Users + document metadata |
+| File storage | Supabase S3 (`athenaeum` bucket) | Raw PDF objects; S3 object key in `documents.content` |
 | Embeddings | `all-MiniLM-L6-v2` (384-dim) | Sentence-level dense vectors |
 | LLM | Gemini 3.6 Flash (OpenAI-compatible) | Grounded generation |
 | PDF parser | pypdf | Page-level text extraction |
@@ -106,7 +107,7 @@ services/vectorstore.py       Qdrant collection CRUD, search, delete
 | id | UUID (36-char string) | PK, used as Qdrant `doc_id` |
 | user_id | UUID (FK → users.id) | indexed |
 | filename | VARCHAR(512) | original upload name |
-| storage_path | VARCHAR(1024) | `uploads/{user_id}/{doc_id}.pdf` |
+| content | LargeBinary | S3 object key `{user_id}/{doc_id}.pdf` (UTF-8 bytes) in the `athenaeum` bucket; raw PDF bytes are **not** stored in the DB |
 | total_pages | INT | populated after ingest |
 | status | VARCHAR(32) | `processing` → `ready` or `failed` |
 | error | VARCHAR(1024) | nullable, error message on failure |
@@ -212,12 +213,14 @@ Client                          FastAPI                    Redis/RQ        Worke
   │  files[]                      │                         │               │                  │
   │ ─────────────────────────────→│                         │               │                  │
   │                               │ validate: .pdf only,    │               │                  │
-  │                               │ size ≤ 50MB             │               │                  │
+  │                               │ size ≤ MAX_UPLOAD_MB    │               │                  │
   │                               │                         │               │                  │
-  │                               │ save to uploads/        │               │                  │
-  │                               │   {user_id}/{doc_id}.pdf│               │                  │
+  │                               │ PUT key {user_id}/      │               │                  │
+  │                               │   {doc_id}.pdf → S3     │               │                  │
+  │                               │   `athenaeum` bucket    │               │                  │
   │                               │                         │               │                  │
   │                               │ INSERT document         │               │                  │
+  │                               │   content=S3 key        │               │                  │
   │                               │   status="processing"   │               │                  │
   │                               │                         │               │                  │
   │                               │ enqueue_job(             │               │                  │
@@ -228,6 +231,9 @@ Client                          FastAPI                    Redis/RQ        Worke
   │←──────────────────────────────│                         │               │                  │
   │                               │                         │  (in-process) │                  │
   │                               │                         │──────────────→│                  │
+  │                               │                         │               │ GET S3 object    │
+  │                               │                         │               │  (download by key│
+  │                               │                         │               │   from content)  │
   │                               │                         │               │ load_pdf_pages() │
   │                               │                         │               │ pypdf: per-page  │
   │                               │                         │               │   text extraction│
@@ -332,10 +338,10 @@ uses `k=8` (broader coverage).
 DELETE /documents/{doc_id}
   │
   ├─ verify ownership (row.user_id == current_user.id)
+  ├─ storage.delete_object(row.content)   # S3 `athenaeum` bucket
   ├─ delete_documents(user_id, doc_id)
   │    └─ Qdrant FilterSelector(filter=metadata.doc_id == doc_id)
   │       └─ removes all matching points
-  ├─ os.remove(storage_path)
   ├─ db.delete(row) + db.commit()
   └─ 204 No Content
 ```
@@ -376,9 +382,14 @@ cd ~/Desktop/Open\ Source/athenaeum
 | `EMBEDDING_DIM` | Vector dimension | `384` |
 | `REDIS_HOST` | Redis server | `localhost` |
 | `REDIS_PORT` | Redis port | `6379` |
-| `UPLOAD_DIR` | PDF file storage | `uploads` |
+| `UPLOAD_DIR` | Legacy local PDF directory (unused) | `uploads` |
 | `DATABASE_URL` | SQLAlchemy connection string | `sqlite:///./athenaeum.db` |
 | `MAX_UPLOAD_MB` | Per-file upload cap | `50` |
+| `SUPABASE_S3_ENDPOINT` | Supabase S3-compatible endpoint (`https://{ref}.storage.supabase.co/storage/v1/s3`) | required |
+| `SUPABASE_S3_REGION` | Region used for SigV4 signing | `ap-southeast-2` |
+| `SUPABASE_S3_BUCKET` | Storage bucket for PDFs | `athenaeum` |
+| `SUPABASE_S3_ACCESS_KEY` | S3 access key (Dashboard → Storage → Settings → S3 Access Keys) | required |
+| `SUPABASE_S3_SECRET_KEY` | S3 secret key | required |
 | `JOB_TIMEOUT` | RQ job timeout (seconds) | `900` |
 | `JOB_RESULT_TTL` | How long results persist (seconds) | `86400` |
 
@@ -623,6 +634,44 @@ pass. To reproduce the failure mode, let the worker idle past Neon's
 idle-connection cutoff, then enqueue a job; the worker log should show
 the pre-ping reconnect (no `SSL connection has been closed` error in the
 failure path).
+
+### 6.8 Supabase S3-compatible storage
+
+**What changed:** PDF bytes moved out of the `documents.content`
+LargeBinary column into a private Supabase Storage bucket (`athenaeum`).
+The `content` column now stores the **S3 object key** (`{user_id}/{doc_id}.pdf`,
+UTF-8 encoded) — the frontend API contract is unchanged, so no frontend
+changes were needed.
+
+**The three traps that shaped the implementation:**
+
+1. **`create_all` does not migrate.** `init_db()` runs
+   `Base.metadata.create_all()`, which creates tables but never alters
+   existing ones. Adding a new `storage_path` column would have crashed
+   on the live Postgres table with `column does not exist`. Hence
+   reusing the existing `content` column for the key — zero migration.
+   If you ever add a real column, you'll need an Alembic migration or a
+   manual `ALTER TABLE`.
+
+2. **endpoint_url ≠ AWS.** Supabase's S3-compatible API lives at
+   `https://{project-ref}.storage.supabase.co/storage/v1/s3`. boto3
+   needs `endpoint_url` set (it's not AWS), plus `aws_access_key_id` /
+   `aws_secret_access_key` from **Dashboard → Storage → Settings → S3
+   Access Keys** (the storage keys, not the project API keys). The
+   `region_name` is only used for SigV4 request signing — set it to the
+   project region (`ap-southeast-2` here).
+
+3. **Ingestion must fetch from S3.** `ingest_document` (a background
+   task) no longer has the PDF bytes in the DB row — it decodes the key
+   from `row.content` and does `download_object()`. So if you ever
+   delete an object out-of-band (dashboard/CLI), ingestion will mark the
+   doc `failed`. Deletion only touches S3 when a key is present, so old
+   rows with binary content still delete cleanly.
+
+**Failure handling:** the upload endpoint uploads to S3 **before**
+committing the DB row; if the PUT fails it rolls back and returns 500,
+so there's no dangling row. Ordering was chosen so a partially-uploaded
+object can't outlive its row.
 
 ---
 

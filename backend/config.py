@@ -29,5 +29,11 @@ class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./athenaeum.db")
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
 
+    SUPABASE_S3_ENDPOINT: str = os.getenv("SUPABASE_S3_ENDPOINT", "")
+    SUPABASE_S3_REGION: str = os.getenv("SUPABASE_S3_REGION", "ap-southeast-2")
+    SUPABASE_S3_BUCKET: str = os.getenv("SUPABASE_S3_BUCKET", "athenaeum")
+    SUPABASE_S3_ACCESS_KEY: str = os.getenv("SUPABASE_S3_ACCESS_KEY", "")
+    SUPABASE_S3_SECRET_KEY: str = os.getenv("SUPABASE_S3_SECRET_KEY", "")
+
 
 settings = Settings()
