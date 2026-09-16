@@ -1,9 +1,9 @@
 """Retry helper for transient infrastructure failures (DB / network).
 
-Wrapped job functions become self-healing: a dropped/stale Postgres
-connection (e.g. Neon killing idle SSL connections) or a transient
-Qdrant/network error is retried with exponential backoff instead of
-failing the RQ job and leaving documents stuck at "processing".
+Wrapped functions become self-healing: a dropped/stale Postgres
+connection (e.g. a cloud provider killing idle SSL connections) or a
+transient Qdrant/network error is retried with exponential backoff
+instead of failing and leaving documents stuck at "processing".
 """
 
 import functools

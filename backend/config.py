@@ -35,5 +35,7 @@ class Settings:
     SUPABASE_S3_ACCESS_KEY: str = os.getenv("SUPABASE_S3_ACCESS_KEY", "")
     SUPABASE_S3_SECRET_KEY: str = os.getenv("SUPABASE_S3_SECRET_KEY", "")
 
+    HF_TOKEN: str = os.getenv("HF_TOKEN", "")
+
 
 settings = Settings()
