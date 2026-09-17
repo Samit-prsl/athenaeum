@@ -7,6 +7,10 @@ import type {
   TokenPair,
   UploadItem,
   User,
+  VivaSession,
+  VivaSessionDetail,
+  VivaStart,
+  VivaTurnResult,
 } from './types'
 
 const API_URL =
@@ -188,6 +192,44 @@ export async function summary(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, document_ids }),
   })
+}
+
+export async function startViva(
+  topic: string,
+  num_questions: number,
+  difficulty: string,
+  document_ids: string[] | null,
+): Promise<VivaStart> {
+  return request<VivaStart>('/viva/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, num_questions, difficulty, document_ids }),
+  })
+}
+
+export async function submitVivaAnswer(
+  sessionId: string,
+  audio: Blob,
+): Promise<VivaTurnResult> {
+  const form = new FormData()
+  form.append('session_id', sessionId)
+  form.append('audio', audio, 'answer.webm')
+  return request<VivaTurnResult>('/viva/turn', {
+    method: 'POST',
+    body: form,
+  })
+}
+
+export async function listVivaSessions(): Promise<VivaSession[]> {
+  return request<VivaSession[]>('/viva/sessions')
+}
+
+export async function getVivaSession(sessionId: string): Promise<VivaSessionDetail> {
+  return request<VivaSessionDetail>(`/viva/sessions/${sessionId}`)
+}
+
+export async function deleteVivaSession(sessionId: string): Promise<void> {
+  return request<void>(`/viva/sessions/${sessionId}`, { method: 'DELETE' })
 }
 
 export type { Quiz }

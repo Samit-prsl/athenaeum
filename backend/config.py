@@ -14,6 +14,12 @@ class Settings:
     GROQ_API_KEY : str = os.getenv('GROQ_API_KEY', '')
     BASE_URL_GROQ : str = os.getenv('BASE_URL_GROQ', '')
     MODEL_NAME_GROQ : str = os.getenv('MODEL_NAME_GROQ', '')
+    GROQ_STT_MODEL: str = os.getenv('GROQ_STT_MODEL', 'whisper-large-v3-turbo')
+    GROQ_TTS_MODEL: str = os.getenv('GROQ_TTS_MODEL', 'canopylabs/orpheus-v1-english')
+    GROQ_TTS_VOICE: str = os.getenv('GROQ_TTS_VOICE', 'austin')
+    GROQ_TTS_MAX_CHARS: int = int(os.getenv('GROQ_TTS_MAX_CHARS', '200'))
+    GROQ_TTS_PROMPT_MAX_CHARS: int = int(os.getenv('GROQ_TTS_PROMPT_MAX_CHARS', '180'))
+    VIVA_K_CONTEXT: int = int(os.getenv('VIVA_K_CONTEXT', '6'))
 
     JWT_SECRET: str = os.getenv("JWT_SECRET", "change-me")
     ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")

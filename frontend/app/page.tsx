@@ -13,6 +13,7 @@ import {
   Loader2,
   LogOut,
   Menu,
+  Mic,
   Plus,
   Send,
   Sparkles,
@@ -22,10 +23,11 @@ import {
 } from 'lucide-react'
 import { AuthScreen } from '@/components/auth-screen'
 import { ThemeToggle } from '@/components/theme-toggle'
+import { VivaView } from '@/components/viva-view'
 import * as api from '@/lib/api'
 import type { ChatEntry, Document, Quiz, User } from '@/lib/types'
 
-type View = 'Overview' | 'Documents' | 'Chat' | 'Quiz' | 'Summary'
+type View = 'Overview' | 'Documents' | 'Chat' | 'Quiz' | 'Summary' | 'Viva'
 
 type JobLoading = { kind: View; label: string }
 
@@ -35,6 +37,7 @@ const navItems: { label: View; icon: typeof LayoutDashboard }[] = [
   { label: 'Chat', icon: Bot },
   { label: 'Quiz', icon: CircleHelp },
   { label: 'Summary', icon: FileText },
+  { label: 'Viva', icon: Mic },
 ]
 
 const docTints = [
@@ -219,6 +222,19 @@ export default function Page() {
               description="Get a clear, focused overview of any topic in your library."
             >
               <SummaryView documents={documents} selectedIds={selectedIds} />
+            </PageHeader>
+          )}
+
+          {activeView === 'Viva' && (
+            <PageHeader
+              title="Viva practice"
+              description="A spoken oral exam that evaluates your answers and tells you what to revise."
+            >
+              <VivaView
+                documents={documents}
+                selectedIds={selectedIds}
+                onToggleDoc={toggleDoc}
+              />
             </PageHeader>
           )}
         </div>

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -76,3 +76,84 @@ class SummaryRequest(BaseModel):
 
 class SummaryOut(BaseModel):
     summary: str
+
+
+# --------------------------------------------------------------------------- #
+# Viva (voice oral exam)
+# --------------------------------------------------------------------------- #
+class VivaStartRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=512)
+    num_questions: int = Field(default=5, ge=1, le=20)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    document_ids: Optional[list[str]] = None
+
+
+class VivaQuestionOut(BaseModel):
+    question: str
+    question_audio: str  # base64-encoded WAV bytes from TTS
+    turn_index: int
+    total_questions: int
+    page: Optional[str] = None
+
+
+class VivaStartOut(BaseModel):
+    session_id: str
+    question: VivaQuestionOut
+
+
+class VivaEvaluation(BaseModel):
+    score: int
+    missed_points: list[str] = []
+    feedback: str = ""
+
+
+class VivaReportOut(BaseModel):
+    overall_score: float
+    strengths: list[str]
+    weaknesses: list[str]
+    recommended_revisions: list[str]
+    summary: str
+
+
+class VivaTurnResult(BaseModel):
+    done: bool = False
+    transcript: Optional[str] = None
+    feedback: Optional[str] = None
+    question: Optional[VivaQuestionOut] = None
+    report: Optional[VivaReportOut] = None
+
+
+class VivaSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    topic: str
+    num_questions: int
+    difficulty: str
+    status: str
+    score: Optional[float] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class VivaTurnOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    question: str
+    page: str
+    answer_text: str
+    evaluation: Optional[VivaEvaluation] = None
+    created_at: datetime
+
+
+class VivaSessionDetailOut(BaseModel):
+    id: str
+    topic: str
+    num_questions: int
+    difficulty: str
+    status: str
+    score: Optional[float] = None
+    report: Optional[VivaReportOut] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    turns: list[VivaTurnOut]

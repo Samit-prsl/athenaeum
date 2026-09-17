@@ -7,6 +7,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     HTTPException,
     UploadFile,
     status,
@@ -31,6 +32,11 @@ from schemas import (
     UploadsOut,
     UserOut,
     RegisterRequest,
+    VivaSessionDetailOut,
+    VivaSessionOut,
+    VivaStartOut,
+    VivaStartRequest,
+    VivaTurnResult,
 )
 from services.db import get_db, init_db
 from services.rag import answer_question, generate_quiz, generate_summary, ingest_document
@@ -303,3 +309,146 @@ def summary(
         payload.document_ids,
     )
     return SummaryOut(summary=result)
+
+
+# --------------------------------------------------------------------------- #
+# Viva (voice oral exam)
+# --------------------------------------------------------------------------- #
+@app.post("/viva/start", response_model=VivaStartOut)
+def start_viva(
+    payload: VivaStartRequest,
+    current_user: User = Depends(get_current_user),
+) -> VivaStartOut:
+    from services.viva import start_viva as run_viva
+
+    try:
+        return run_viva(
+            current_user.id,
+            payload.topic,
+            payload.num_questions,
+            payload.difficulty,
+            payload.document_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+
+@app.post("/viva/turn", response_model=VivaTurnResult)
+def submit_viva_turn(
+    session_id: str = Form(...),
+    audio: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+) -> VivaTurnResult:
+    from services.viva import run_turn
+
+    try:
+        return run_turn(
+            current_user.id,
+            session_id,
+            audio.file.read(),
+            audio.content_type or "audio/webm",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+
+@app.get("/viva/sessions", response_model=list[VivaSessionOut])
+def list_viva_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from models import VivaSession as VivaSessionRow
+
+    return (
+        db.query(VivaSessionRow)
+        .filter(VivaSessionRow.user_id == current_user.id)
+        .order_by(VivaSessionRow.created_at.desc())
+        .all()
+    )
+
+
+@app.get("/viva/sessions/{session_id}", response_model=VivaSessionDetailOut)
+def get_viva_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    import json as json_module
+
+    from models import VivaSession as VivaSessionRow
+    from models import VivaTurn as VivaTurnRow
+
+    session = (
+        db.query(VivaSessionRow)
+        .filter(
+            VivaSessionRow.id == session_id,
+            VivaSessionRow.user_id == current_user.id,
+        )
+        .first()
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Viva session not found"
+        )
+
+    def load_json(raw):
+        try:
+            return json_module.loads(raw)
+        except (TypeError, json_module.JSONDecodeError):
+            return None
+
+    turns = (
+        db.query(VivaTurnRow)
+        .filter(VivaTurnRow.session_id == session_id)
+        .order_by(VivaTurnRow.created_at.asc())
+        .all()
+    )
+    return {
+        "id": session.id,
+        "topic": session.topic,
+        "num_questions": session.num_questions,
+        "difficulty": session.difficulty,
+        "status": session.status,
+        "score": session.score,
+        "report": load_json(session.report),
+        "created_at": session.created_at,
+        "completed_at": session.completed_at,
+        "turns": [
+            {
+                "question": turn.question,
+                "page": turn.page,
+                "answer_text": turn.answer_text,
+                "evaluation": load_json(turn.evaluation),
+                "created_at": turn.created_at,
+            }
+            for turn in turns
+        ],
+    }
+
+
+@app.delete("/viva/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_viva_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from models import VivaSession as VivaSessionRow
+
+    session = (
+        db.query(VivaSessionRow)
+        .filter(
+            VivaSessionRow.id == session_id,
+            VivaSessionRow.user_id == current_user.id,
+        )
+        .first()
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Viva session not found"
+        )
+    db.delete(session)
+    db.commit()
