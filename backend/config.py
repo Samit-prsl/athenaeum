@@ -33,7 +33,7 @@ class Settings:
 
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./athenaeum.db")
-    MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
+    MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "20"))
 
     SUPABASE_S3_ENDPOINT: str = os.getenv("SUPABASE_S3_ENDPOINT", "")
     SUPABASE_S3_REGION: str = os.getenv("SUPABASE_S3_REGION", "ap-southeast-2")
