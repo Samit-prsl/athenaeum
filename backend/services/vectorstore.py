@@ -1,7 +1,6 @@
 from typing import Optional
 
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -15,20 +14,9 @@ from qdrant_client.models import (
 )
 
 from config import settings
+from services.embeddings import get_embeddings
 
-_embeddings: Optional[HuggingFaceEndpointEmbeddings] = None
 _client_cache: Optional[QdrantClient] = None
-
-
-def get_embeddings() -> HuggingFaceEndpointEmbeddings:
-    global _embeddings
-    if _embeddings is None:
-        _embeddings = HuggingFaceEndpointEmbeddings(
-            model=settings.EMBEDDING_MODEL,
-            task="feature-extraction",
-            huggingfacehub_api_token=settings.HF_TOKEN,
-        )
-    return _embeddings
 
 
 def collection_name(user_id: str) -> str:

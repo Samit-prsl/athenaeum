@@ -1,4 +1,6 @@
+import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -39,6 +41,7 @@ from schemas import (
     VivaTurnResult,
 )
 from services.db import get_db, init_db
+from services.embeddings import warmup_embeddings
 from services.rag import answer_question, generate_quiz, generate_summary, ingest_document
 from services.security import (
     create_access_token,
@@ -50,10 +53,25 @@ from services.security import (
 from services.storage import build_key, delete_object, upload_object
 from services.vectorstore import delete_documents
 
+log = logging.getLogger("athenaeum.server")
+
+
+def _warmup_embeddings() -> None:
+    try:
+        warmup_embeddings()
+    except Exception:
+        log.exception("Embedding warm-up failed; will retry on first use")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    if os.getenv("EMBEDDING_WARMUP", "1") != "0":
+        threading.Thread(
+            target=_warmup_embeddings,
+            name="embedding-warmup",
+            daemon=True,
+        ).start()
     yield
 
 

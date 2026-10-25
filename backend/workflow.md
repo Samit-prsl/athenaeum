@@ -29,7 +29,7 @@ uploaded content with page-level citations.
 | Vector store | Qdrant | Per-user collections, similarity search |
 | Relational DB | Postgres (Supabase) / SQLite fallback | Users + document metadata |
 | File storage | Supabase S3 (`athenaeum` bucket) | Raw PDF objects; S3 object key in `documents.content` |
-| Embeddings | HF Inference API — `HuggingFaceEndpointEmbeddings` (`all-MiniLM-L6-v2`, 384-dim) | Hosted server-side embedding; **no model loaded into app RAM** |
+| Embeddings | FastEmbed ONNX — `sentence-transformers/all-MiniLM-L6-v2` (384-dim) | Local CPU embedding; no `torch`, no hosted embedding API |
 | LLM | Groq (`openai/gpt-oss-120b`, OpenAI-compatible) | Grounded generation |
 | PDF parser | pypdf | Page-level text extraction |
 
@@ -41,9 +41,9 @@ Key design decisions:
   that runs in the API process; chat/quiz/summary are synchronous. This keeps
   the deployment to a single process (important for small hosts), at the cost
   of true concurrency — see §6.1 and §7.2.
-- **Embeddings are remote.** The only ML component that used to consume
-  significant RAM (a local sentence-transformers model) now runs on
-  HuggingFace's servers.
+- **Embeddings run locally through ONNX.** FastEmbed executes
+  `all-MiniLM-L6-v2` with ONNX Runtime, avoiding both the `torch` memory
+  footprint and the cost/availability of a hosted embedding API.
 
 ---
 
@@ -67,7 +67,7 @@ Key design decisions:
                   └──────────────┘ └──────────────┘ └────────────────┘
                           │               │
                           │        ┌──────▼─────────────────────────┐
-                          │        │ HF Inference API (remote HTTP) │
+                          │        │ FastEmbed ONNX (in-process)    │
                           │        │  all-MiniLM-L6-v2 → 384-dim    │
                           │        └────────────────────────────────┘
                           │
@@ -254,7 +254,7 @@ Client                          FastAPI                 S3        BackgroundTask
   │                               │                      │              │ delete old points│
   │                               │                      │              │ (idempotent)     │
   │                               │                      │              │ add_documents()  │
-  │                               │                      │              │  (remote embed)  │
+  │                               │                      │              │  (local ONNX)    │
   │                               │                      │              │────────────────→│
   │                               │                      │              │ UPDATE document: │
   │                               │                      │              │  status=ready,   │
@@ -276,9 +276,9 @@ is rolled back and the endpoint returns 500 — so a partially-uploaded object
 can't outlive its row while a committed row can't reference a missing key.
 
 **Why a background task?** The upload response returns as soon as the object
-is stored; parsing + remote embedding then run after the response, without
-blocking the client. A 50-page PDF can take many seconds because each page
-batch is a network round-trip to the HF Inference API.
+is stored; parsing + local embedding then run after the response, without
+blocking the client. A 50-page PDF can still take several seconds because
+ONNX inference and Qdrant upserts run in the API process.
 
 **Page-level chunking** (`services/pdf.py:7-35`): each non-empty page becomes
 one LangChain `Document`. This is a deliberate choice over sliding-window
@@ -321,7 +321,7 @@ Client                          FastAPI                         Worker internals
   │                               │  _retrieve_context():           │
   │                               │    search(user_id, query, k=4,  │
   │                               │      document_ids)              │
-  │                               │    → embed_query (remote HF)    │
+  │                               │    → embed_query (local ONNX)   │
   │                               │    → Qdrant query_points()      │
   │                               │      cosine similarity → top-k  │
   │                               │                                 │
@@ -412,7 +412,9 @@ docker build -t athenaeum-api .
 docker run --env-file .env -p 8081:8081 athenaeum-api
 ```
 
-The image no longer downloads any model at build time (embeddings are remote).
+The image downloads and caches the ONNX embedding model at build time
+(`FASTEMBED_CACHE_PATH=/app/.fastembed-cache`), so container start does not
+pay the model-download cost.
 
 ### Environment variables (`.env`)
 
@@ -431,9 +433,11 @@ The image no longer downloads any model at build time (embeddings are remote).
 | `REFRESH_TOKEN_EXPIRE_DAYS` | Refresh token TTL | `7` |
 | `QDRANT_URL` | Qdrant server | `http://localhost:6333` |
 | `QDRANT_API_KEY` | Qdrant API key (cloud) | — |
-| `EMBEDDING_MODEL` | HF model id used by the hosted Inference API | `sentence-transformers/all-MiniLM-L6-v2` |
+| `EMBEDDING_MODEL` | FastEmbed model id | `sentence-transformers/all-MiniLM-L6-v2` |
 | `EMBEDDING_DIM` | Vector dimension | `384` |
-| `HF_TOKEN` | HuggingFace access token for the Inference API (required in prod; generate at https://huggingface.co/settings/tokens) | required |
+| `FASTEMBED_CACHE_PATH` | Model cache directory | `/tmp/fastembed_cache` |
+| `EMBEDDING_WARMUP` | Set to `0` to disable startup warm-up | `1` |
+| `HF_TOKEN` | Optional HuggingFace token for model downloads (not required for inference) | — |
 | `DATABASE_URL` | SQLAlchemy connection string | `sqlite:///./athenaeum.db` |
 | `MAX_UPLOAD_MB` | Per-file upload cap | `10` |
 | `UPLOAD_DIR` | Legacy local PDF directory (unused) | `uploads` |
@@ -469,8 +473,8 @@ brought a class of operational problems disproportionate to the app's size:
   restarted in *both* places, and a worker pointing at the wrong Redis
   (local Docker vs cloud) silently left jobs `QUEUED` forever.
 
-Since embeddings are now remote (no model to preload) and a queue wasn't
-needed for correctness, the worker layer was deleted entirely in favour of
+Since embeddings now run in-process and a queue wasn't needed for
+correctness, the worker layer was deleted entirely in favour of
 Starlette's `BackgroundTasks`. Net result: one process, no Redis dependency,
 no fork concerns. The tradeoff is that ingestion shares the API process and
 its event loop/threadpool — acceptable for this scale, but see §7.2.
@@ -598,7 +602,7 @@ changes were needed.
 
 *File: `services/storage.py:25-44`*
 
-### 6.7 Remote embeddings migration (fixing OOM on a 512MB host)
+### 6.7 Embedding migration history (OOM → hosted → local ONNX)
 
 **Symptom:** the app OOM-crashed on a memory-constrained host (Render
 512MB), especially on upload/ingest.
@@ -607,30 +611,35 @@ changes were needed.
 all-MiniLM-L6-v2")` loaded the model into the app process. With `torch` +
 `transformers` + weights this consumed **300-400MB+**, leaving no headroom.
 
-**What we measured on the old local path (historical):**
-| Stage | Cost |
-|-------|------|
-| HF Hub unauthenticated network check | ~7s |
-| `import torch` + `transformers` + `sentence-transformers` | ~3s |
-| Actual `encode()` of a few pages | ~0.1s |
+**Second attempt:** `HuggingFaceEndpointEmbeddings` moved inference to the
+HuggingFace Inference API. That removed the RAM cost, but Inference
+Providers later began billing feature-extraction calls. With no account
+credits, every embedding request returned `402 Payment Required`, breaking
+`/chat`, `/quiz`, `/summary`, `/viva`, and new ingestion.
 
-**Fix:** switched `services/vectorstore.py` to
-`HuggingFaceEndpointEmbeddings`, which sends embedding requests over HTTPS
-to the HuggingFace Inference API — the model runs on HF's servers, **not in
-the container**. `HF_TOKEN` authenticates the calls. The Dockerfile's
-`snapshot_download` build step and `HF_HOME` env were removed, and
-`torch`, `transformers`, `sentence-transformers`, `safetensors`,
-`tokenizers`, `scikit-learn`, `scipy`, `joblib`, `sympy`, `networkx`,
-`mpmath`, and `threadpoolctl` were dropped from `requirements.txt`.
+**Current fix:** `services/embeddings.py` implements a LangChain
+`Embeddings` wrapper around FastEmbed, which runs
+`sentence-transformers/all-MiniLM-L6-v2` as an ONNX model through ONNX
+Runtime. It keeps the same 384-dimensional vector space (so existing Qdrant
+points remain compatible) without `torch`, without a hosted embedding API,
+and without per-query cost. `threads=1` and `enable_cpu_mem_arena=False`
+keep the memory footprint bounded on the 512MB host.
 
-**Verify:** `curl`/Python `embed_query("hello")` returns a 384-length
-vector. In prod, confirm `HF_TOKEN` is set — a missing/invalid token yields
-401/403 from `huggingface.co`.
+**Model lifecycle:** the model is downloaded once into
+`FASTEMBED_CACHE_PATH` (Docker bakes it at build time). On hosts that build
+from the repo without Docker, `server.py` starts an optional background
+warm-up thread at app startup; set `EMBEDDING_WARMUP=0` to disable it and
+pay the download cost on first use instead.
 
-**Tradeoffs:** remote embeddings add network latency (~200-500ms per batch,
-plus provider cold start) and are subject to free-tier rate limits (429).
-Mitigations: retry/backoff in `vectorstore.py`, smaller batches, or a
-dedicated HF Inference Endpoint. See §7.5.
+**Verify:** `./venv/bin/python scripts/embeddings_smoke.py` asserts the
+384-dimension output and that a relevant document scores higher than an
+unrelated one. `HF_TOKEN` is no longer required for inference; it is only
+an optional token for model downloads.
+
+**Tradeoffs:** ONNX inference uses CPU and a small amount of RAM in-process
+(roughly 90MB of weights plus runtime overhead). If a 512MB host is still
+tight, switch to the smaller `BAAI/bge-small-en-v1.5` model and reindex, or
+upgrade the instance. See §7.5.
 
 ---
 
@@ -646,9 +655,9 @@ retrieved documents instead of relying on training data. The pipeline
 is: embed query → retrieve top-k similar chunks → inject them into a
 system prompt → LLM generates a grounded response.
 
-**Implementation:** `services/vectorstore.py:111-149` performs cosine
-similarity search via `QdrantClient.query_points()` using
-`all-MiniLM-L6-v2` embeddings (384-dim, hosted on the HF Inference API).
+**Implementation:** `services/vectorstore.py:99-137` performs cosine
+similarity search via `QdrantClient.query_points()` using locally generated
+`all-MiniLM-L6-v2` embeddings (384-dim).
 Retrieved documents are joined into a context string
 (`services/rag.py:31-43`) with explicit page number and source file labels.
 The system prompt (`system_prompt.py:1-37`) constrains the LLM to only use
@@ -785,50 +794,51 @@ search. "all-MiniLM-L6-v2" produces 384-dimensional vectors from
 sentences, optimized for semantic similarity.
 
 **Implementation:**
-- `services/vectorstore.py:23-31`: `HuggingFaceEndpointEmbeddings` is
-  lazily initialized once per process (singleton pattern) and points at
-  the HuggingFace Inference API — the model runs on HuggingFace's
-  servers, **not** in the app process
-- `services/vectorstore.py:122`: `embed_query()` converts the user's
-  question to a 384-dim vector over HTTPS
-- `services/vectorstore.py:135-141`: `QdrantClient.query_points()`
+- `services/embeddings.py:11-32`: `FastEmbeddings` implements LangChain's
+  `Embeddings` interface on top of `fastembed.TextEmbedding`, which runs
+  `all-MiniLM-L6-v2` through ONNX Runtime in-process
+- `services/embeddings.py:36-43`: `get_embeddings()` lazily initializes a
+  process-wide singleton with a lock
+- `services/vectorstore.py:110`: `embed_query()` converts the user's
+  question to a 384-dim vector locally
+- `services/vectorstore.py:123-129`: `QdrantClient.query_points()`
   performs approximate nearest neighbor (ANN) search with cosine
   distance
-- `services/vectorstore.py:61-73`: collection created with
+- `services/vectorstore.py:49-61`: collection created with
   `VectorParams(size=384, distance=Distance.COSINE)`
 
-**Why MiniLM-L6-v2 (hosted):**
-- Served by the HF Inference API, so **no weights and no `torch`
-  runtime** in the container — critical on memory-constrained hosts
-  (e.g. Render 512MB)
+**Why MiniLM-L6-v2 (ONNX):**
+- Same model and 384-dimensional vector space as the previous setup, so
+  existing Qdrant collections do not need a reindex
+- ONNX Runtime avoids the `torch` / `transformers` RAM cost that caused
+  OOM crashes on a 512MB host
+- No hosted embedding API means no per-query billing, rate limits, or
+  `402` outages
 - Good balance of quality/speed for student content
-- 384 dimensions keeps storage and search efficient and matches
-  `EMBEDDING_DIM`
 
-**Embedding lifecycle (remote):**
-`get_embeddings()` returns a thin `HuggingFaceEndpointEmbeddings`
-client authenticated with `HF_TOKEN`. There is **no model download, no
-`HF_HOME` cache, no preload, and no in-process inference**. The first
-call may pay a provider cold start; subsequent calls are network
-round-trips (~200-500ms per batch). Ingestion runs as a Starlette
-`BackgroundTask` in the API process (`server.py`), so remote calls
-don't block the upload response.
+**Embedding lifecycle (local):**
+`get_embeddings()` builds a `TextEmbedding` with `threads=1` and
+`enable_cpu_mem_arena=False` to keep CPU and memory usage bounded. The
+model is downloaded once into `FASTEMBED_CACHE_PATH`; Docker bakes it at
+build time, and `server.py` starts an optional background warm-up thread
+on hosts without a build-time download. Ingestion runs as a Starlette
+`BackgroundTask` in the API process (`server.py`), so embedding does not
+block the upload response. A lock serializes embed calls because
+ingestion can run concurrently in the threadpool.
 
-**Memory note:** the previous design loaded
-`sentence-transformers/all-MiniLM-L6-v2` (plus `torch` / `transformers`)
-into RAM — the cause of OOM crashes on a 512MB host. Switching to the
-hosted endpoint removed `torch`, `transformers`,
-`sentence-transformers`, `safetensors`, `tokenizers`, `scikit-learn`,
-`scipy`, `joblib`, `sympy`, `networkx`, `mpmath` and `threadpoolctl`
-from `requirements.txt` (the Dockerfile's model `snapshot_download` step
-was also dropped).
+**Memory note:** the original design loaded
+`sentence-transformers/all-MiniLM-L6-v2` with `torch` / `transformers`
+into RAM — the cause of OOM crashes on a 512MB host. FastEmbed keeps the
+same model but runs the ONNX graph without those dependencies. The
+remaining cost is roughly 90MB of model weights plus ONNX Runtime
+overhead.
 
 **Improvement ideas:**
-- Add retry/backoff around the Inference API for transient 429/503s
 - Batch or cache embeddings for repeated queries
-- Use a dedicated HF Inference Endpoint for guaranteed throughput
 - Use Qdrant's built-in payload indexes on `metadata.doc_id` for
   faster filtered search
+- If memory is still tight, switch to a smaller 384-dim model such as
+  `BAAI/bge-small-en-v1.5` and reindex
 
 ### 7.6 Prompt engineering for grounded generation
 
@@ -919,7 +929,7 @@ Postgres.
 | In-process ingestion | `BackgroundTasks` shares the API process; not durable | Move to RQ/Celery + dedicated worker(s) |
 | SQLite writes | Single-file, ~30s timeout | Postgres + connection pooling (already the prod path) |
 | Qdrant collections | 1 per user (lightweight) | Shard across nodes when >50K collections |
-| Embedding latency | Remote HF Inference API round-trip per batch (no local model) | Batch/cache embeddings, or a dedicated HF Inference Endpoint |
+| Embedding latency | Local ONNX inference shares the API process | Batch/cache embeddings, or move embedding to a dedicated worker |
 | LLM latency | Synchronous call blocks the request | Streaming responses; multiple API instances |
 | No ingest retry | Failed ingest stays `failed` | Job-level `Retry(max=3, ...)` + reconciliation sweep |
 | Status updates | Client polls `GET /documents` | SSE/WebSocket push |
@@ -939,7 +949,7 @@ Postgres.
 | SQL injection | Safe (SQLAlchemy ORM + parameterized) | Same |
 | Path traversal | `os.path.basename()` strips dirs | Same |
 | Secrets in `.env` | Gitignored (`.env.*`, `.env`) | Rotate regularly |
-| HF token | In `.env` / host env | Rotate; scope to inference only |
+| HF token | Optional in `.env` / host env for model downloads | Rotate; inference does not use it |
 
 ---
 
@@ -949,9 +959,10 @@ Postgres.
 |---------|-------------|-----|
 | `GET /documents` stuck at `processing` | Background task crashed, or process restarted mid-ingest | Check server log; re-upload the PDF (no automatic retry) |
 | Ingest marks doc `failed` with `S3`/`download` error | Object missing from the `athenaeum` bucket | Confirm the key in `documents.content` exists in Supabase Storage |
-| Ingest fails with 401/403 from `huggingface.co` | Missing or invalid `HF_TOKEN` | Set `HF_TOKEN` in `.env` (token from huggingface.co/settings/tokens) |
-| Ingest fails with 429/timeout from the HF Inference API | Free-tier rate limit or provider cold start | Add retry/backoff in `vectorstore.py`, lower batch size, or use a dedicated HF Inference Endpoint |
-| Ingest is slow / times out (even for small PDFs) | Remote HF Inference API round-trips, provider cold start, or rate limiting | Add retry/backoff + lower batch size in `vectorstore.py`; consider a dedicated HF Inference Endpoint (§7.5) |
+| Startup or first ingest fails while downloading the embedding model | No network access, missing cache, or corrupted cache | Run `python scripts/download_embedding_model.py`; set `FASTEMBED_CACHE_PATH` to a writable directory and clear stale cache (§6.7) |
+| Ingest/chat is slow on first request after deploy | ONNX model was not pre-downloaded | Run the download script at build time or keep `EMBEDDING_WARMUP=1` (§6.7) |
+| App OOMs or is killed during ingest | ONNX Runtime plus model exceeds host memory | Keep `threads=1`/`enable_cpu_mem_arena=False`; switch to `BAAI/bge-small-en-v1.5` + reindex, or upgrade the instance (§7.5) |
+| Embedding calls return `402 Payment Required` | Stale deployment still using `HuggingFaceEndpointEmbeddings` | Deploy the FastEmbed version; confirm no `langchain-huggingface` references remain |
 | `GET /chat` returns "No documents have been indexed yet" | Qdrant filter returned 0 points — wrong field path, or docs not ready | Check `metadata.doc_id` not `doc_id`; ensure docs are `ready` (§6.4) |
 | `DELETE /documents/{id}` returns 204 but points remain | Wrong filter path in delete | Confirm `metadata.doc_id` (`services/vectorstore.py:102-108`) |
 | Second upload of the same PDF fails with `Index required but not found for metadata.doc_id` | Qdrant payload index missing for nested filter field | `_ensure_payload_indexes()` creates keyword indexes on `metadata.doc_id`/`metadata.user_id` at collection creation + before delete (§6.4) |
