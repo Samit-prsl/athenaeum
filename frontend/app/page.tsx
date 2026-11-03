@@ -22,6 +22,7 @@ import {
   X,
 } from 'lucide-react'
 import { AuthScreen } from '@/components/auth-screen'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { VivaView } from '@/components/viva-view'
 import * as api from '@/lib/api'
@@ -81,6 +82,9 @@ export default function Page() {
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showUpload, setShowUpload] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<Document | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -246,6 +250,17 @@ export default function Page() {
           onUploaded={() => void refreshDocuments()}
         />
       )}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete document?"
+        description={`Delete "${deleteTarget?.filename ?? ''}"? This can't be undone.`}
+        confirmLabel="Delete document"
+        busy={deleteBusy}
+        error={deleteError}
+        onConfirm={() => void confirmDeleteDocument()}
+        onCancel={closeDeleteDialog}
+      />
     </div>
   )
 
@@ -255,15 +270,31 @@ export default function Page() {
     )
   }
 
-  async function handleDeleteDocument(id: string) {
+  function handleDeleteDocument(id: string) {
     const doc = documents.find((d) => d.id === id)
     if (!doc) return
-    if (!window.confirm(`Delete "${doc.filename}"? This can't be undone.`)) return
+    setDeleteError(null)
+    setDeleteTarget(doc)
+  }
+
+  function closeDeleteDialog() {
+    if (deleteBusy) return
+    setDeleteTarget(null)
+    setDeleteError(null)
+  }
+
+  async function confirmDeleteDocument() {
+    if (!deleteTarget || deleteBusy) return
+    setDeleteBusy(true)
+    setDeleteError(null)
     try {
-      await api.deleteDocument(id)
+      await api.deleteDocument(deleteTarget.id)
+      setDeleteTarget(null)
       await refreshDocuments()
     } catch (err) {
-      if (err instanceof Error) window.alert(err.message)
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete the document.')
+    } finally {
+      setDeleteBusy(false)
     }
   }
 }

@@ -18,6 +18,7 @@ import {
   Target,
   Trash2,
 } from 'lucide-react'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import * as api from '@/lib/api'
 import type {
   Document,
@@ -542,6 +543,9 @@ function VivaLive({
 function VivaHistory({ onOpen, onStartNew }: { onOpen: (id: string) => void; onStartNew: () => void }) {
   const [history, setHistory] = useState<VivaSession[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<VivaSession | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -556,18 +560,35 @@ function VivaHistory({ onOpen, onStartNew }: { onOpen: (id: string) => void; onS
     void load()
   }, [load])
 
-  async function handleDelete(id: string, topic: string) {
-    if (!window.confirm(`Delete the viva on "${topic}"? This can't be undone.`)) return
+  function requestDelete(session: VivaSession) {
+    setDeleteError(null)
+    setDeleteTarget(session)
+  }
+
+  function closeDeleteDialog() {
+    if (deleteBusy) return
+    setDeleteTarget(null)
+    setDeleteError(null)
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleteBusy) return
+    setDeleteBusy(true)
+    setDeleteError(null)
     try {
-      await api.deleteVivaSession(id)
+      await api.deleteVivaSession(deleteTarget.id)
+      setDeleteTarget(null)
       await load()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete the viva.')
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete the viva.')
+    } finally {
+      setDeleteBusy(false)
     }
   }
 
   return (
-    <div className={`max-w-[820px] rounded-[16px] border p-5 sm:p-7 ${border} ${surface}`}>
+    <>
+      <div className={`max-w-[820px] rounded-[16px] border p-5 sm:p-7 ${border} ${surface}`}>
       <div className="mb-5 flex items-center gap-3">
         <div className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#eeedff] text-[#5b52eb] dark:bg-[#2b2750] dark:text-[#aaa3fa]">
           <ClipboardList size={18} />
@@ -634,7 +655,7 @@ function VivaHistory({ onOpen, onStartNew }: { onOpen: (id: string) => void; onS
                   <FileText size={13} /> Report
                 </button>
                 <button
-                  onClick={() => void handleDelete(session.id, session.topic)}
+                  onClick={() => requestDelete(session)}
                   aria-label={`Delete viva on ${session.topic}`}
                   className="text-[#a7a8b2] transition-colors hover:text-[#c7463a] dark:text-[#6f717c] dark:hover:text-[#f0887d]"
                 >
@@ -645,7 +666,19 @@ function VivaHistory({ onOpen, onStartNew }: { onOpen: (id: string) => void; onS
           ))}
         </div>
       )}
-    </div>
+      </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete viva?"
+        description={`Delete the viva on "${deleteTarget?.topic ?? ''}"? This can't be undone.`}
+        confirmLabel="Delete viva"
+        busy={deleteBusy}
+        error={deleteError}
+        onConfirm={() => void confirmDelete()}
+        onCancel={closeDeleteDialog}
+      />
+    </>
   )
 }
 

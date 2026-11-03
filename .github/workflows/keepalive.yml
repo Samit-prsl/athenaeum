@@ -1,0 +1,61 @@
+name: Service keep-alive
+
+on:
+  schedule:
+    - cron: "*/14 * * * *"
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-keepalive
+  cancel-in-progress: false
+
+jobs:
+  render:
+    name: Keep Render awake
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/14 * * * *'
+    steps:
+      - name: Ping Render health endpoint
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+        run: |
+          set -euo pipefail
+          url="${RENDER_URL%/}/"
+          curl --fail --silent --show-error \
+            --max-time 90 \
+            --retry 3 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            "$url"
+
+  dependencies:
+    name: Keep Qdrant and Supabase active
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 */6 * * *'
+    steps:
+      - name: Ping Qdrant
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+        run: |
+          set -euo pipefail
+          url="${QDRANT_URL%/}/collections"
+          curl --fail --silent --show-error \
+            --max-time 45 \
+            --retry 3 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            -H "api-key: ${QDRANT_API_KEY}" \
+            "$url" > /dev/null
+
+      - name: Query Supabase database
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PGSSLMODE: require
+        run: |
+          set -euo pipefail
+          psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -c "select 1;" > /dev/null
