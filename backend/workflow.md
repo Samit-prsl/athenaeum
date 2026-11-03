@@ -247,14 +247,15 @@ Client                          FastAPI                 S3        BackgroundTask
   │←──────────────────────────────│                      │              │                 │
   │                               │                      │  GET object  │                 │
   │                               │                      │←─────────────│                 │
-  │                               │                      │              │ load_pdf_pages() │
+  │                               │                      │              │ download_to_path │
+  │                               │                      │              │ iter_pdf_pages() │
   │                               │                      │              │ enrich metadata  │
   │                               │                      │              │ ensure_collection│
   │                               │                      │              │────────────────→│
   │                               │                      │              │ delete old points│
   │                               │                      │              │ (idempotent)     │
   │                               │                      │              │ add_documents()  │
-  │                               │                      │              │  (local ONNX)    │
+  │                               │                      │              │  (per page batch)│
   │                               │                      │              │────────────────→│
   │                               │                      │              │ UPDATE document: │
   │                               │                      │              │  status=ready,   │
@@ -266,8 +267,8 @@ Client                          FastAPI                 S3        BackgroundTask
 **Endpoint behaviour** (`server.py:163-220`): for each file it validates the
 `.pdf` extension and streams the body while enforcing `MAX_UPLOAD_MB`
 (`settings.MAX_UPLOAD_MB * 1024 * 1024`, default **10 MB**). It inserts the
-row and `flush()`es to obtain an id, uploads the bytes to S3, stores the key
-in `content`, commits, then schedules `ingest_document` via
+row and `flush()`es to obtain an id, streams the upload file object to S3,
+stores the key in `content`, commits, then schedules `ingest_document` via
 `background_tasks.add_task(...)`. The response is `202` with
 `{uploads: [{filename, document_id}]}`.
 
@@ -435,6 +436,8 @@ pay the model-download cost.
 | `QDRANT_API_KEY` | Qdrant API key (cloud) | — |
 | `EMBEDDING_MODEL` | FastEmbed model id | `sentence-transformers/all-MiniLM-L6-v2` |
 | `EMBEDDING_DIM` | Vector dimension | `384` |
+| `EMBEDDING_BATCH_SIZE` | Texts embedded per ONNX batch | `8` |
+| `INGEST_PAGE_BATCH` | PDF pages parsed/upserted per ingestion batch | `8` |
 | `FASTEMBED_CACHE_PATH` | Model cache directory | `/tmp/fastembed_cache` |
 | `EMBEDDING_WARMUP` | Set to `0` to disable startup warm-up | `1` |
 | `HF_TOKEN` | Optional HuggingFace token for model downloads (not required for inference) | — |
@@ -597,8 +600,9 @@ changes were needed.
 
 3. **Ingestion must fetch from S3.** `ingest_document` (a background task)
    no longer has the PDF bytes in the DB row — it decodes the key from
-   `row.content` and calls `download_object()`. If an object is deleted
-   out-of-band (dashboard/CLI), ingestion marks the doc `failed`.
+   `row.content` and calls `download_to_path()` (a streaming S3 download to a
+   temporary file). If an object is deleted out-of-band (dashboard/CLI),
+   ingestion marks the doc `failed`.
 
 *File: `services/storage.py:25-44`*
 

@@ -30,6 +30,8 @@ class Settings:
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "384"))
+    EMBEDDING_BATCH_SIZE: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "8"))
+    INGEST_PAGE_BATCH: int = int(os.getenv("INGEST_PAGE_BATCH", "8"))
 
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./athenaeum.db")

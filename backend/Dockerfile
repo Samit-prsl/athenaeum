@@ -2,7 +2,10 @@ FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    FASTEMBED_CACHE_PATH=/app/.fastembed-cache
+    FASTEMBED_CACHE_PATH=/app/.fastembed-cache \
+    OMP_NUM_THREADS=1 \
+    ORT_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2
 
 WORKDIR /app
 

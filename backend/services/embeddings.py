@@ -8,8 +8,8 @@ from config import settings
 
 
 class FastEmbeddings(Embeddings):
-    def __init__(self, model_name: str, batch_size: int = 32) -> None:
-        self._batch_size = batch_size
+    def __init__(self, model_name: str, batch_size: int | None = None) -> None:
+        self._batch_size = max(1, batch_size or settings.EMBEDDING_BATCH_SIZE)
         self._lock = Lock()
         self._model = TextEmbedding(
             model_name=model_name,

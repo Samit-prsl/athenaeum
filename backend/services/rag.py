@@ -1,6 +1,10 @@
+import gc
 import json
 import logging
+import os
 import re
+import tempfile
+from threading import Lock
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -16,6 +20,7 @@ load_dotenv()
 log = logging.getLogger("athenaeum.rag")
 
 _llm: Optional[OpenAI] = None
+_ingest_lock = Lock()
 
 
 def _get_llm() -> OpenAI:
@@ -60,44 +65,68 @@ def _complete(system_prompt: str, user_message: str, json_mode: bool = False) ->
 
 @retry_on_errors()
 def ingest_document(user_id: str, document_id: str) -> dict:
-    import io
+    from pypdf import PdfReader
 
     from models import Document as DocumentRow
     from services.db import SessionLocal
-    from services.pdf import load_pdf_pages
-    from services.storage import download_object
-    from services.vectorstore import add_documents, delete_documents
+    from services.pdf import iter_pdf_pages
+    from services.storage import download_to_path
+    from services.vectorstore import add_documents, delete_documents, ensure_collection
 
     db = SessionLocal()
     row = None
     try:
-        row = db.get(DocumentRow, document_id)
-        if row is None:
-            raise ValueError(f"Document {document_id} does not exist")
+        with _ingest_lock:
+            row = db.get(DocumentRow, document_id)
+            if row is None:
+                raise ValueError(f"Document {document_id} does not exist")
 
-        if not row.content:
-            raise ValueError(f"Document {document_id} has no stored object key")
+            if not row.content:
+                raise ValueError(f"Document {document_id} has no stored object key")
 
-        stream = io.BytesIO(download_object(row.content.decode()))
-        pages, total_pages = load_pdf_pages(stream, name=row.filename)
-        for page_doc in pages:
-            page_doc.metadata["user_id"] = user_id
-            page_doc.metadata["doc_id"] = document_id
-            page_doc.metadata["source"] = row.filename
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = os.path.join(tmpdir, "document.pdf")
+                download_to_path(row.content.decode(), path)
 
-        delete_documents(user_id, document_id)
-        add_documents(user_id, pages)
+                reader = PdfReader(path)
+                try:
+                    total_pages = len(reader.pages)
+                    delete_documents(user_id, document_id)
+                    ensure_collection(user_id)
 
-        row.total_pages = total_pages
-        row.status = "ready"
-        row.error = None
-        db.commit()
+                    page_batch_size = max(1, settings.INGEST_PAGE_BATCH)
+                    chunks_indexed = 0
+                    batch = []
+                    for page_doc in iter_pdf_pages(reader, name=row.filename):
+                        page_doc.metadata["user_id"] = user_id
+                        page_doc.metadata["doc_id"] = document_id
+                        page_doc.metadata["source"] = row.filename
+                        batch.append(page_doc)
 
-        return {
-            "document_id": document_id,
-            "total_pages": total_pages,
-            "chunks_indexed": len(pages),
-        }
+                        if len(batch) >= page_batch_size:
+                            add_documents(user_id, batch, ensure=False)
+                            chunks_indexed += len(batch)
+                            batch.clear()
+                            gc.collect()
+
+                    if batch:
+                        add_documents(user_id, batch, ensure=False)
+                        chunks_indexed += len(batch)
+                        batch.clear()
+                finally:
+                    reader.close()
+                    gc.collect()
+
+            row.total_pages = total_pages
+            row.status = "ready"
+            row.error = None
+            db.commit()
+
+            return {
+                "document_id": document_id,
+                "total_pages": total_pages,
+                "chunks_indexed": chunks_indexed,
+            }
     except Exception as exc:
         if row is not None:
             try:
