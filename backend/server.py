@@ -50,7 +50,7 @@ from services.security import (
     hash_password,
     verify_password,
 )
-from services.storage import build_key, delete_object, upload_object
+from services.storage import build_key, delete_object, upload_fileobj
 from services.vectorstore import delete_documents
 
 log = logging.getLogger("athenaeum.server")
@@ -202,20 +202,17 @@ def upload_documents(
                 detail=f"Only PDF files are allowed, got '{original}'",
             )
 
-        size = 0
-        chunks: list[bytes] = []
-        while chunk := file.file.read(1024 * 1024):
-            size += len(chunk)
-            if size > max_bytes:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File '{original}' exceeds {settings.MAX_UPLOAD_MB} MB",
-                )
-            chunks.append(chunk)
+        file.file.seek(0, os.SEEK_END)
+        size = file.file.tell()
+        file.file.seek(0)
+        if size > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File '{original}' exceeds {settings.MAX_UPLOAD_MB} MB",
+            )
 
         from models import Document as DocumentRow
 
-        data = b"".join(chunks)
         row = DocumentRow(
             user_id=current_user.id,
             filename=original,
@@ -226,7 +223,7 @@ def upload_documents(
 
         key = build_key(current_user.id, row.id)
         try:
-            upload_object(key, data)
+            upload_fileobj(key, file.file)
         except Exception:
             db.rollback()
             raise HTTPException(

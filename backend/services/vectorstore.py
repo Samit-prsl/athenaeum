@@ -61,8 +61,11 @@ def ensure_collection(user_id: str) -> str:
     return name
 
 
-def add_documents(user_id: str, documents: list[Document]) -> None:
-    ensure_collection(user_id)
+def add_documents(
+    user_id: str, documents: list[Document], ensure: bool = True
+) -> None:
+    if ensure:
+        ensure_collection(user_id)
     from langchain_qdrant import QdrantVectorStore
 
     store = QdrantVectorStore(
